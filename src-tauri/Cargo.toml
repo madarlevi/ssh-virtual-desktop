@@ -21,7 +21,7 @@ anyhow = "1"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
-sha2 = "0.10"
+sha2 = "0.11"
 keyring = { version = "3", features = ["windows-native"] }
 rfd = { version = "0.17", default-features = false }
 zeroize = "1"
