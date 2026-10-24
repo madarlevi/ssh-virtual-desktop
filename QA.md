@@ -1,6 +1,8 @@
 # Verification record
 
-**Current Update 2 (0.2.0):** see [the complete verification report](docs/update-2-verification.md). The records below preserve the earlier 0.1.x checks and limitations.
+**Current Update 3 (0.3.0):** see [the Update 3 verification report](docs/update-3-verification.md) and [FreeBSD test instructions](docs/freebsd.md). Live SSH and native browser workflows remain unverified without a reachable test server.
+
+**Archived Update 2 (0.2.0):** see [the complete verification report](docs/update-2-verification.md). The records below preserve the earlier 0.1.x checks and limitations.
 
 Date: 24 October 2026. Primary environment: Windows x64, Rust 1.94.1, Node 24.13.1, MSVC Visual Studio Community 2026, WebView2 155.0.4283.62.
 

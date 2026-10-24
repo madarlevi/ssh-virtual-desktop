@@ -1,8 +1,8 @@
 [package]
 name = "ssh-virtual-desktop"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
-description = "A local desktop for your remote Linux server"
+description = "A local desktop for FreeBSD and Linux servers"
 authors = ["Madár Levente (madarlevi)"]
 edition = "2021"
 rust-version = "1.88"
@@ -28,7 +28,7 @@ zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "=0.39.1"
-windows = { version = "=0.62.2", features = ["Win32_System_Com"] }
+windows = { version = "=0.62.2", features = ["Win32_System_Com", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [profile.release]
 lto = "thin"

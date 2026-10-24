@@ -72,7 +72,47 @@ async fn small(c: &Connection, path: &str) -> Result<String> {
     Ok(String::from_utf8(c.sftp.read(path).await?)?)
 }
 pub async fn backends(c: &Connection) -> Result<Vec<String>> {
-    Ok(ssh::exec(c,"for x in aria2c wget curl setsid nohup sh wc ln mv mkdir date sleep rm cat tail rmdir chmod; do command -v \"$x\" >/dev/null 2>&1 && printf '%s\\n' \"$x\"; done; :").await?.lines().map(String::from).collect())
+    Ok(c.remote.tools.clone())
+}
+pub async fn destination(c: &Connection, previous: Option<&str>) -> Result<String> {
+    crate::remote::choose_directory(&c.home, previous, |candidate| async move {
+        let path = c.sftp.canonicalize(candidate).await.ok()?;
+        if c.sftp.metadata(&path).await.is_ok_and(|m| m.is_dir())
+            && c.sftp.read_dir(&path).await.is_ok()
+        {
+            Some(path)
+        } else {
+            None
+        }
+    })
+    .await
+}
+pub async fn clear_history(c: &Connection) -> Result<()> {
+    for job in list(c, true).await? {
+        if !matches!(job.status.as_str(), "Completed" | "Cancelled" | "Failed") {
+            continue;
+        }
+        // A stale-heartbeat failure might still have a live worker; do not erase it.
+        let dir = format!("{}/{}", root(c), job.id);
+        let status = small(c, &format!("{dir}/status")).await.unwrap_or_default();
+        if !matches!(status.trim(), "Completed" | "Cancelled" | "Failed") {
+            continue;
+        }
+        for entry in c.sftp.read_dir(&dir).await? {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            security::filename(&name)?;
+            if entry.metadata().is_dir() {
+                bail!("Unexpected nested directory in job metadata; nothing outside the job was removed")
+            };
+            c.sftp.remove_file(format!("{dir}/{name}")).await?;
+        }
+        c.sftp.remove_dir(&dir).await?;
+    }
+    c.completed_jobs.lock().await.clear();
+    Ok(())
 }
 pub fn select_backend(tools: &[String], advanced: bool) -> Result<&'static str> {
     if advanced {
@@ -81,12 +121,57 @@ pub fn select_backend(tools: &[String], advanced: bool) -> Result<&'static str> 
         };
         bail!("This request needs curl on the server (headers, authentication or POST). No packages were installed.")
     }
-    ["aria2c", "wget", "curl"]
+    ["aria2c", "curl", "wget", "fetch"]
         .into_iter()
         .find(|s| tools.iter().any(|t| t == s))
-        .context("Install aria2c, wget or curl on the server to enable remote downloads")
+        .context("No downloader found: FreeBSD fetch, aria2c, curl or wget is required. No packages were installed.")
+}
+async fn private_directories(c: &Connection, jobdir: &str) -> Result<()> {
+    for suffix in [
+        ".local",
+        ".local/state",
+        ".local/state/ssh-virtual-desktop",
+        ".local/state/ssh-virtual-desktop/jobs",
+    ] {
+        let dir = format!("{}/{suffix}", c.home.trim_end_matches('/'));
+        let new = !c.sftp.try_exists(&dir).await?;
+        if new {
+            c.sftp.create_dir(&dir).await?;
+        }
+        let attrs = c.sftp.symlink_metadata(&dir).await?;
+        if !attrs.is_dir() || attrs.is_symlink() {
+            bail!(
+                "The private download state path must contain real directories, not symbolic links"
+            )
+        }
+        if new || suffix.contains("ssh-virtual-desktop") {
+            c.sftp
+                .set_metadata(
+                    &dir,
+                    russh_sftp::protocol::FileAttributes {
+                        permissions: Some(0o700),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
+    }
+    c.sftp.create_dir(jobdir).await?;
+    c.sftp
+        .set_metadata(
+            jobdir,
+            russh_sftp::protocol::FileAttributes {
+                permissions: Some(0o700),
+                ..Default::default()
+            },
+        )
+        .await?;
+    Ok(())
 }
 pub async fn start(c: &Connection, r: Request, vault: &RequestVault) -> Result<Job> {
+    if !r.request.confirmed {
+        bail!("Choose a destination and confirm Download to Server before starting any download")
+    }
     let resolved = r.request.resolve(vault)?;
     let url = resolved.url.clone();
     security::path(&r.directory)?;
@@ -106,8 +191,7 @@ pub async fn start(c: &Connection, r: Request, vault: &RequestVault) -> Result<J
         resolved.method != "GET" || !resolved.headers.is_empty(),
     )?;
     for cmd in [
-        "setsid", "nohup", "sh", "wc", "ln", "mv", "mkdir", "date", "sleep", "rm", "cat", "tail",
-        "rmdir", "chmod",
+        "sh", "wc", "link", "mv", "mkdir", "date", "sleep", "rm", "cat", "rmdir",
     ] {
         if !has(cmd) {
             bail!("Remote background jobs require the '{cmd}' utility. No packages were installed.")
@@ -116,19 +200,23 @@ pub async fn start(c: &Connection, r: Request, vault: &RequestVault) -> Result<J
     let id = uuid::Uuid::new_v4().to_string();
     let root = root(c);
     let jobdir = format!("{root}/{id}");
-    // Credentials are transferred only after explicit per-download approval.
-    ssh::exec(
-        c,
-        &format!(
-            "umask 077; mkdir -p -- {r} && test ! -L {r} && chmod 700 -- {r} && mkdir -- {j}",
-            r = quote(&root)?,
-            j = quote(&jobdir)?
-        ),
-    )
-    .await?;
+    // SFTP permissions avoid chmod's incompatible argument parsing on FreeBSD.
+    let launch = c.remote.launch(&format!("{jobdir}/run.sh"))?;
+    if backend == "fetch" && url::Url::parse(&url)?.query().is_some() {
+        bail!("FreeBSD fetch exposes its URL in process arguments. Use curl, aria2c or wget for signed/query URLs.")
+    }
+    private_directories(c, &jobdir).await?;
     let job = Job {
         id: id.clone(),
-        url,
+        url: if resolved.authenticated
+            || resolved.method != "GET"
+            || !resolved.headers.is_empty()
+            || url::Url::parse(&url)?.query().is_some()
+        {
+            String::new()
+        } else {
+            url
+        },
         directory: directory.clone(),
         filename: r.filename.clone(),
         backend: backend.into(),
@@ -153,28 +241,35 @@ pub async fn start(c: &Connection, r: Request, vault: &RequestVault) -> Result<J
             write(
                 c,
                 &format!("{jobdir}/request.urls"),
-                format!("{}\n", job.url).as_bytes(),
+                format!("{}\n", resolved.url).as_bytes(),
+            )
+            .await?;
+        }
+        if backend == "fetch" {
+            write(
+                c,
+                &format!("{jobdir}/fetch.sh"),
+                format!(
+                    "#!/bin/sh\nexec fetch -q -T 30 -N /dev/null -o {} {}\n",
+                    quote(&security::join(
+                        &job.directory,
+                        &format!(".svd-{}.part", job.id)
+                    )?)?,
+                    quote(&resolved.url)?
+                )
+                .as_bytes(),
             )
             .await?;
         }
         if let Some(body) = &resolved.body {
             write(c, &format!("{jobdir}/request.body"), body).await?;
         }
-        // setsid gives the job a separate session; nohup survives SSH disconnect.
-        ssh::exec(
-            c,
-            &format!(
-                "nohup setsid sh {} </dev/null >{} 2>&1 &",
-                quote(&format!("{jobdir}/run.sh"))?,
-                quote(&format!("{jobdir}/launch.log"))?
-            ),
-        )
-        .await?;
+        ssh::exec(c, &launch).await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
     if let Err(error) = setup {
-        for file in ["request.conf", "request.urls", "request.body"] {
+        for file in ["request.conf", "request.urls", "request.body", "fetch.sh"] {
             let _ = c.sftp.remove_file(format!("{jobdir}/{file}")).await;
         }
         return Err(error.context("Unable to prepare remote download; temporary request files were removed where reachable"));
@@ -215,6 +310,7 @@ fn worker(job: &Job, jobdir: &str) -> Result<String> {
         "aria2c" => format!("aria2c --no-conf=true --no-netrc=true --enable-rpc=false --follow-torrent=false --follow-metalink=false --split=1 --max-connection-per-server=1 --enable-mmap=false --allow-overwrite=false --auto-file-renaming=false --file-allocation=none --check-certificate=true --max-tries=3 --retry-wait=1 --summary-interval=0 --show-console-readout=false --console-log-level=error --download-result=hide --dir={} --out={} --input-file=\"$job/request.urls\"", quote(&job.directory)?, quote(&partial_name)?),
         "wget" => format!("wget --no-config --no-netrc --quiet --tries=3 --timeout=30 --max-redirect=10 --output-document={} --input-file=\"$job/request.urls\"",quote(&partial)?),
         "curl" => "curl --disable --config \"$job/request.conf\" > \"$job/http-status\"".into(),
+        "fetch" => "/bin/sh \"$job/fetch.sh\"".into(),
         _ => bail!("Unsupported backend"),
     };
     // Values enter the shell exclusively as POSIX-quoted words. Cancellation uses
@@ -226,13 +322,13 @@ job={jobdir}
 part={partial}
 target={target}
 lock="$target.svd-lock"
-request_cleanup() {{ rm -f -- "$job/request.conf" "$job/request.body" "$job/request.urls"; }}
+request_cleanup() {{ rm -f "$job/request.conf" "$job/request.body" "$job/request.urls" "$job/fetch.sh"; }}
 trap request_cleanup EXIT
-state() {{ printf '%s\n' "$1" > "$job/status.next"; mv -f -- "$job/status.next" "$job/status"; }}
+state() {{ printf '%s\n' "$1" > "$job/status.next"; mv -f "$job/status.next" "$job/status"; }}
 state Starting
 date +%s > "$job/heartbeat"
-if ! mkdir -- "$lock" 2>/dev/null; then printf '%s\n' 'Destination reserved by another job; choose another filename.' > "$job/error"; state Failed; exit 1; fi
-cleanup() {{ rm -f -- "$part" "$part.aria2"; rmdir -- "$lock" 2>/dev/null; }}
+if ! mkdir "$lock" 2>/dev/null; then printf '%s\n' 'Destination reserved by another job; choose another filename.' > "$job/error"; state Failed; exit 1; fi
+cleanup() {{ rm -f "$part" "$part.aria2"; rmdir "$lock" 2>/dev/null; }}
 abort() {{ trap '' INT TERM; kill "$child" "$watcher" 2>/dev/null; wait "$child" 2>/dev/null; cleanup; state Failed; exit 1; }}
 trap abort INT TERM
 if [ -e "$target" ] || [ -L "$target" ]; then printf '%s\n' 'Destination already exists' > "$job/error"; cleanup; state Failed; exit 1; fi
@@ -264,7 +360,7 @@ fi
 if [ "$code" -eq 0 ]; then
   # Hard-link publication is atomic and fails if the destination appears meanwhile.
   # Partial and final file are in the same directory and filesystem.
-  if ln -T -- "$part" "$target" 2> "$job/error"; then
+  if link "$part" "$target" 2> "$job/error"; then
     wc -c < "$target" > "$job/bytes"
     cleanup; state Completed
   else cleanup; state Failed; fi
@@ -379,6 +475,62 @@ pub async fn cancel(c: &Connection, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn export_workers_for_native_freebsd_and_linux_ci() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/compatibility-fixtures");
+        std::fs::create_dir_all(&directory).unwrap();
+        for backend in ["curl", "fetch", "wget", "aria2c"] {
+            let job = Job {
+                id: uuid::Uuid::nil().to_string(),
+                url: String::new(),
+                directory: "/SVD_FIXTURE_DEST".into(),
+                filename: "-résumé ' ;$(touch nope).txt".into(),
+                backend: backend.into(),
+                started: 0,
+                status: "Waiting".into(),
+                downloaded: 0,
+                total: None,
+                error: None,
+                persistent: true,
+                method: "GET".into(),
+                authenticated: false,
+                header_count: 0,
+            };
+            let partial = format!("/SVD_FIXTURE_DEST/.svd-{}.part", job.id);
+            let target = security::join(&job.directory, &job.filename).unwrap();
+            let script = worker(&job, "/SVD_FIXTURE_JOB")
+                .unwrap()
+                .replace(&quote("/SVD_FIXTURE_JOB").unwrap(), "\"$SVD_JOB\"")
+                .replace(
+                    &quote(&partial).unwrap(),
+                    &format!("\"$SVD_DEST/.svd-{}.part\"", job.id),
+                )
+                .replace(
+                    &quote(&target).unwrap(),
+                    &format!("\"$SVD_DEST\"/{}", quote(&job.filename).unwrap()),
+                )
+                .replace(&quote(&job.directory).unwrap(), "\"$SVD_DEST\"");
+            assert!(!script.contains("chmod"));
+            assert!(!script.contains("mv -fT"));
+            assert!(!script.contains("ln -T"));
+            assert!(!script.contains(" -- \""));
+            std::fs::write(directory.join(format!("worker-{backend}.sh")), script).unwrap();
+            std::fs::write(directory.join("filename.txt"), &job.filename).unwrap();
+        }
+    }
+    #[test]
+    fn confirmation_is_explicit_and_fetch_is_available_without_gnu_tools() {
+        let input: Input =
+            serde_json::from_value(serde_json::json!({"url":"https://example.com"})).unwrap();
+        assert!(!input.confirmed);
+        assert_eq!(select_backend(&["fetch".into()], false).unwrap(), "fetch");
+        assert!(select_backend(&["fetch".into()], true).is_err());
+        assert_eq!(
+            select_backend(&["fetch".into(), "curl".into()], true).unwrap(),
+            "curl"
+        );
+    }
+    #[test]
     fn worker_quotes_untrusted_values() {
         let job = Job {
             id: uuid::Uuid::nil().to_string(),
@@ -398,7 +550,7 @@ mod tests {
         };
         let script = worker(&job, "/tmp/job").unwrap();
         assert!(!script.contains(&job.url));
-        assert!(script.contains("ln -T -- \"$part\" \"$target\""));
+        assert!(script.contains("link \"$part\" \"$target\""));
         assert!(!script.contains("eval "));
     }
 

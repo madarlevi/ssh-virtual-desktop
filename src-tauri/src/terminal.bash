@@ -1,6 +1,6 @@
 # Session-only Bash integration. This file is removed as soon as Bash reads it.
 if [[ -n ${SVD_TERMINAL_RC-} ]]; then
-  command rm -f -- "$SVD_TERMINAL_RC"
+  command rm -f "$SVD_TERMINAL_RC"
   unset SVD_TERMINAL_RC
 fi
 if [[ ${SVD_TERMINAL_TEST-} != 1 && -r ~/.bashrc ]]; then

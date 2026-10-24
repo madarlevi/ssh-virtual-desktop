@@ -13,7 +13,7 @@ body:
   - type: textarea
     id: environment
     attributes:
-      label: Windows, WebView2, Linux and shell versions
+      label: Windows, WebView2, remote OS (FreeBSD/Linux), downloader and shell versions
   - type: textarea
     id: steps
     attributes:

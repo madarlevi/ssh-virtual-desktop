@@ -8,7 +8,7 @@ pub fn command(cwd: Option<&str>) -> Result<String> {
 fn launcher(cwd: Option<&str>) -> Result<String> {
     let cd = if let Some(cwd) = cwd {
         path(cwd)?;
-        format!("cd -- {} || exit; ", quote(cwd)?)
+        format!("cd {} || exit; ", quote(cwd)?)
     } else {
         String::new()
     };
@@ -18,7 +18,7 @@ fn launcher(cwd: Option<&str>) -> Result<String> {
 bash)
   if "$SHELL" -c '(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) ))' 2>/dev/null; then
     svd_rc=$(umask 077; mktemp "${{TMPDIR:-/tmp}}/svd-terminal.XXXXXXXX") || exec "$SHELL" -l
-    if ! printf '%s\n' {script} > "$svd_rc"; then rm -f -- "$svd_rc"; exec "$SHELL" -l; fi
+    if ! printf '%s\n' {script} > "$svd_rc"; then rm -f "$svd_rc"; exec "$SHELL" -l; fi
     export SVD_TERMINAL_RC="$svd_rc"
     exec "$SHELL" --noprofile --rcfile "$svd_rc" -i
   fi
@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn cwd_is_serialized_as_one_word() {
         let script = launcher(Some("/tmp/a'b;$(touch nope)")).unwrap();
-        assert!(script.starts_with("cd -- '/tmp/a'\"'\"'b;$(touch nope)' || exit;"));
+        assert!(script.starts_with("cd '/tmp/a'\"'\"'b;$(touch nope)' || exit;"));
         assert!(command(Some("/tmp/../etc")).is_err());
     }
     #[test]

@@ -4011,7 +4011,7 @@ dependencies = [
 
 [[package]]
 name = "ssh-virtual-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

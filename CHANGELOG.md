@@ -4,6 +4,31 @@ All notable changes are documented here, following [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-24
+
+### Added
+
+- FreeBSD/Linux platform detection, native command adapters, FreeBSD daemon detachment and public fetch downloads.
+- Independent native WebView2 tabs, search, titles/favicons, keyboard shortcuts, deferred popup tabs and runtime-supported find.
+- Per-profile persistent last-download directories, validated fallback locations and confirmation for every start/retry.
+- Native Cancel + Handled interception on every tab; explicit opt-in blob/data Windows-cache-to-SFTP transfer.
+- Shared real-byte progress monitor, toolbar active counts, completion notifications and clear-finished history.
+- Directory/consent/tab/cancellation regressions and generated worker fixtures for native Linux/FreeBSD CI.
+
+### Fixed
+
+- FreeBSD chmod failure: private permissions now use SFTP attributes, without shell chmod.
+- GNU-only publication/editor/copy flags on FreeBSD; shell control execution now explicitly uses /bin/sh for tcsh/fish accounts.
+- Native browser layering behind workspace modals/windows; inactive tabs retain loaded pages.
+- Query/advanced URLs omitted from permanent job metadata; fetch rejects URLs it cannot protect in process arguments.
+
+### Limitations
+
+- Native FreeBSD/Linux CI and connected acceptance tests have not run in the development environment. Cross-job resume remains unsupported. See QA.md.
+- No tag has been pushed and no GitHub release is claimed.
+
+## [0.2.0] - 2026-10-24
+
 ### Added
 
 - Public repository documentation, MIT license template, contribution/security policies and issue/PR templates.

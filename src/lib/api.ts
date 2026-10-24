@@ -1,12 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 export interface Profile { id: string; name: string; host: string; port: number; username: string; auth: 'password'|'key'; keyPath: string }
-export interface Connection { home: string; profile: Profile }
+export interface Connection { home: string; profile: Profile; remote:{platform:'FreeBSD'|'Linux'|'Other';tools:string[]} }
 export interface RemoteEntry { name: string; path: string; isDir: boolean; isLink: boolean; size: number; modified: number }
 export interface Listing { path: string; entries: RemoteEntry[]; cached:boolean; updatedAt:number }
 export interface DirectoryScan {enabled:boolean;scanning:boolean;root:string;depth:number;folders:number;entries:number;updatedAt:number;errors:string[];partial:boolean}
 export interface TextFile { path: string; text: string; revision: string }
 export interface Download { id: string; url: string; directory: string; filename: string; backend: string; started: number; status: string; downloaded: number; total: number|null; error: string|null; persistent: boolean; method:string; authenticated:boolean; headerCount:number }
-export interface DownloadInput {url:string;offerId?:string;method?:string;headers?:Array<{name:string;value:string}>;body?:string;allowAuthentication?:boolean;browserRequest?:boolean;confirmDirect?:boolean}
+export interface DownloadInput {url:string;offerId?:string;method?:string;headers?:Array<{name:string;value:string}>;body?:string;allowAuthentication?:boolean;forwardHeaders?:boolean;browserRequest?:boolean;confirmDirect?:boolean;confirmed?:boolean}
 export interface DownloadPreview {backend:string;request:{method:string;captured:boolean;headerNames:string[];cookieCount:number;authenticationDetected:boolean;bodyBytes:number;bodyUnavailable:boolean;contentDisposition:string|null;total:number|null}}
 export interface Appearance { background: string; wallpaper: string; accent: string; theme: 'dark'|'light'; taskbar: string; window: string }
 export const defaults: Appearance = { background:'#102333', wallpaper:'', accent:'#57b9f4', theme:'dark', taskbar:'#15202c', window:'#1b2837' };
@@ -30,11 +30,17 @@ interface Operations {
   read_text: { args:{path:string};result:TextFile };
   save_text: { args:TextFile;result:TextFile };
   download_start: { args:DownloadInput & {directory:string;filename:string};result:Download };
+  download_local_start:{args:{token:string;directory:string;filename:string;confirmed:boolean;allowClientTransfer:boolean};result:Download};
+  download_local_discard:{args:{token:string};result:void};
   download_preview:{args:DownloadInput;result:DownloadPreview};
   download_discard:{args:{id:string};result:void};
   download_list: { args:{refresh?:boolean};result:Download[] };
   download_cancel: { args:{id:string};result:void };
-  browser_open: { args:{id:string;url:string};result:void };
+  download_destination:{args:Record<string,never>;result:{path:string;fallback:boolean}};
+  download_clear:{args:Record<string,never>;result:void};
+  browser_open: { args:{id:string;owner:string;url:string;popupParent?:string};result:void };
+  browser_desktop:{args:{owner:string|null;blocked:boolean};result:void};
+  browser_find:{args:{id:string;term:string;action:string};result:void};
   browser_bounds: { args:{id:string;x?:number;y?:number;width?:number;height?:number;visible:boolean};result:void };
   browser_action: { args:{id:string;action:string;url?:string};result:void };
   appearance: { args:Appearance;result:void };

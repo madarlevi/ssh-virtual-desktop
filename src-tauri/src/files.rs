@@ -1,5 +1,5 @@
 use crate::{
-    security::{self, quote},
+    security,
     ssh::{self, Connection},
 };
 use anyhow::{bail, Context, Result};
@@ -59,10 +59,19 @@ pub async fn read_listing(c: &Connection, path: &str) -> Result<Listing> {
             continue;
         }
         let md = e.metadata();
+        let full_path = format!("{}/{}", path.trim_end_matches('/'), name);
+        let is_dir = if md.is_symlink() {
+            c.sftp
+                .metadata(&full_path)
+                .await
+                .is_ok_and(|target| target.is_dir())
+        } else {
+            md.is_dir()
+        };
         entries.push(Entry {
-            path: format!("{}/{}", path.trim_end_matches('/'), name),
+            path: full_path,
             name,
-            is_dir: md.is_dir(),
+            is_dir,
             is_link: md.is_symlink(),
             size: md.size.unwrap_or(0),
             modified: md.mtime.unwrap_or(0),
@@ -144,12 +153,7 @@ pub async fn save(c: &Connection, path: &str, text: &str, revision: &str) -> Res
             },
         )
         .await?;
-    if let Err(e) = ssh::exec(
-        c,
-        &format!("mv -fT -- {} {}", quote(&temp)?, quote(&canonical)?),
-    )
-    .await
-    {
+    if let Err(e) = atomic_rename(c, &temp, &canonical).await {
         let _ = c.sftp.remove_file(&temp).await;
         return Err(e);
     }
@@ -184,16 +188,8 @@ pub async fn operation(
                 bail!("Destination already exists")
             }
             if kind == "copy" {
-                // Entire copy runs on Linux. GNU cp is capability-tested by command failure.
-                ssh::exec(
-                    c,
-                    &format!(
-                        "cp -a --no-clobber -- {} {}",
-                        quote(source)?,
-                        quote(destination)?
-                    ),
-                )
-                .await?;
+                // Copy stays on the server; the adapter chooses native BSD/GNU flags.
+                ssh::exec(c, &c.remote.copy(source, destination)?).await?;
             } else {
                 c.sftp.rename(source, destination).await?;
             }
@@ -201,4 +197,31 @@ pub async fn operation(
         _ => bail!("Unsupported file operation"),
     }
     Ok(())
+}
+async fn atomic_rename(c: &Connection, source: &str, destination: &str) -> Result<()> {
+    use russh_sftp::{
+        client::RawSftpSession,
+        protocol::{Packet, StatusCode},
+    };
+    let channel = c.handle.channel_open_session().await?;
+    channel.request_subsystem(true, "sftp").await?;
+    let raw = RawSftpSession::new(channel.into_stream());
+    let version = raw.init().await?;
+    if version
+        .extensions
+        .get("posix-rename@openssh.com")
+        .map(String::as_str)
+        != Some("1")
+    {
+        bail!("The SFTP server lacks atomic posix-rename support; the original file was preserved")
+    }
+    let mut data = Vec::new();
+    for s in [source, destination] {
+        data.extend_from_slice(&(s.len() as u32).to_be_bytes());
+        data.extend_from_slice(s.as_bytes());
+    }
+    match raw.extended("posix-rename@openssh.com", data).await? {
+        Packet::Status(status) if status.status_code == StatusCode::Ok => Ok(()),
+        _ => bail!("Atomic SFTP rename failed; the original file was preserved"),
+    }
 }

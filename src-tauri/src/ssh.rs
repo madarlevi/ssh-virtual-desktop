@@ -30,6 +30,7 @@ impl client::Handler for HostHandler {
     }
 }
 pub struct Connection {
+    pub remote: crate::remote::RemoteCapabilities,
     pub handle: client::Handle<HostHandler>,
     pub sftp: Arc<SftpSession>,
     pub home: String,
@@ -141,15 +142,22 @@ impl Ssh {
         let channel = handle.channel_open_session().await?;
         channel.request_subsystem(true, "sftp").await?;
         let sftp = Arc::new(SftpSession::new(channel.into_stream()).await?);
-        let home = sftp.canonicalize(".").await?;
-        let conn = Arc::new(Connection {
+        let home = match sftp.canonicalize(".").await {
+            Ok(home) => home,
+            Err(_) => sftp.canonicalize("/").await?,
+        };
+        let mut conn = Connection {
+            remote: crate::remote::RemoteCapabilities::default(),
             handle,
             sftp,
             home,
             profile,
             completed_jobs: Mutex::new(HashMap::new()),
             directory_cache: Arc::new(crate::directory_cache::DirectoryCache::default()),
-        });
+        };
+        conn.remote =
+            crate::remote::RemoteCapabilities::parse(&exec(&conn, crate::remote::DETECT).await?);
+        let conn = Arc::new(conn);
         self.disconnect().await;
         *self.connection.lock().await = Some(conn.clone());
         Ok(conn)
@@ -245,7 +253,13 @@ pub fn host_id(p: &Profile) -> String {
 pub async fn exec(conn: &Connection, command: &str) -> Result<String> {
     tokio::time::timeout(Duration::from_secs(45), async {
         let mut channel = conn.handle.channel_open_session().await?;
-        channel.exec(true, command).await?;
+        // FreeBSD accounts commonly use tcsh. The control language is always sh.
+        channel
+            .exec(
+                true,
+                format!("/bin/sh -c {}", crate::security::quote(command)?),
+            )
+            .await?;
         let mut data = Vec::new();
         let mut error = Vec::new();
         let mut status = None;

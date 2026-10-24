@@ -17,9 +17,21 @@ pub struct Profile {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Store {
+    #[serde(default)]
+    pub last_downloads: BTreeMap<String, String>,
     pub profiles: Vec<Profile>,
     pub hosts: BTreeMap<String, String>,
     pub appearance: serde_json::Value,
+}
+impl Store {
+    pub fn remember_download(&mut self, profile: &str, path: &str, confirmed: bool) -> Result<()> {
+        if confirmed {
+            uuid::Uuid::parse_str(profile)?;
+            crate::security::path(path)?;
+            self.last_downloads.insert(profile.into(), path.into());
+        }
+        Ok(())
+    }
 }
 pub fn config_path(app: &tauri::AppHandle) -> Result<PathBuf> {
     let dir = app.path().app_config_dir()?;
@@ -65,4 +77,28 @@ pub fn credential(id: &str, field: &str) -> Result<keyring::Entry> {
         "SSH Virtual Desktop",
         &format!("{id}:{field}"),
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn download_history_is_per_profile_persistent_and_cancel_does_not_change_it() {
+        let a = uuid::Uuid::new_v4().to_string();
+        let b = uuid::Uuid::new_v4().to_string();
+        let mut s = Store::default();
+        s.remember_download(&a, "/root/downloads", true).unwrap();
+        s.remember_download(&b, "/usr/home/user/Downloads", true)
+            .unwrap();
+        s.remember_download(&a, "/tmp/cancelled", false).unwrap();
+        let restored: Store = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(restored.last_downloads[&a], "/root/downloads");
+        assert_eq!(restored.last_downloads[&b], "/usr/home/user/Downloads");
+    }
+    #[test]
+    fn old_settings_migrate_without_history() {
+        let s: Store =
+            serde_json::from_str("{\"profiles\":[],\"hosts\":{},\"appearance\":null}").unwrap();
+        assert!(s.last_downloads.is_empty());
+    }
 }

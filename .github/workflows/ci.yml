@@ -39,3 +39,42 @@ jobs:
       - run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
       - run: npm run tauri build -- --no-bundle
+      - name: Export real worker fixtures for Unix compatibility tests
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: remote-worker-fixtures
+          path: src-tauri/target/compatibility-fixtures/*
+          if-no-files-found: error
+          retention-days: 3
+  remote-linux:
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: remote-worker-fixtures
+          path: .build-cache/compatibility-fixtures
+      - run: /bin/sh tests/remote-worker.sh .build-cache/compatibility-fixtures
+  remote-freebsd:
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: remote-worker-fixtures
+          path: .build-cache/compatibility-fixtures
+      - name: Native FreeBSD base utilities and fetch (no GNU packages)
+        uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
+        with:
+          release: '14.3'
+          usesh: true
+          copyback: false
+          run: /bin/sh tests/remote-worker.sh .build-cache/compatibility-fixtures

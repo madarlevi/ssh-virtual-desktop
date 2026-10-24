@@ -25,7 +25,7 @@
 <main class="connection-screen">
   <aside class="connection-story">
     <div class="brand"><span class="brand-icon"><Icon name="terminal" size={27}/></span><span>SSH Virtual Desktop<small>YOUR SERVER. YOUR SPACE.</small></span></div>
-    <div class="story-body"><div class="eyebrow">A LITTLE CLOSER TO YOUR SERVER</div><h1>Remote power.<br/><span>Local comfort.</span></h1><p>Your Linux server, in a desktop that feels like home. A real shell, remote files, and a browser that runs right here.</p><div class="feature-row"><Icon name="lock"/><span>Encrypted SSH connection</span></div><div class="feature-row"><Icon name="downloads"/><span>Downloads go straight to your server</span></div></div>
+    <div class="story-body"><div class="eyebrow">A LITTLE CLOSER TO YOUR SERVER</div><h1>Remote power.<br/><span>Local comfort.</span></h1><p>Your FreeBSD or Linux server, in a desktop that feels like home. A real shell, remote files, and a browser that runs right here.</p><div class="feature-row"><Icon name="lock"/><span>Encrypted SSH connection</span></div><div class="feature-row"><Icon name="downloads"/><span>Downloads go straight to your server</span></div></div>
     <div class="story-bottom"><span class="status-dot"></span> Locally rendered · Windows desktop</div>
   </aside>
   <section class="connection-form">
@@ -34,7 +34,7 @@
     <form onsubmit={e=>{e.preventDefault();void connect();}}>
       <label>Saved profiles<select aria-label="Saved profiles" onchange={e=>{const p=profiles.find(p=>p.id===e.currentTarget.value);if(p)choose(p);else profile=fresh();}} value={profiles.some(p=>p.id===profile.id)?profile.id:''}><option value="">New connection</option>{#each profiles as p}<option value={p.id}>{p.name}</option>{/each}</select></label>
       <div class="field-grid"><label class="grow">Server address<input bind:value={profile.host} placeholder="192.168.1.10 or server.example.com" required autocomplete="off" disabled={busy}/></label><label class="port">Port<input type="number" min="1" max="65535" bind:value={profile.port} required disabled={busy}/></label></div>
-      <label>Username<input bind:value={profile.username} placeholder="Your Linux username" required autocomplete="username" disabled={busy}/></label>
+      <label>Username<input bind:value={profile.username} placeholder="Your remote username" required autocomplete="username" disabled={busy}/></label>
       <label>Authentication<div class="segmented"><button type="button" class:chosen={profile.auth==='password'} onclick={()=>profile.auth='password'}>Password</button><button type="button" class:chosen={profile.auth==='key'} onclick={()=>profile.auth='key'}>SSH private key</button></div></label>
       {#if profile.auth==='password'}<label>Password<input type="password" bind:value={secret} placeholder="Enter password or use saved credential" autocomplete="current-password" disabled={busy}/></label>
       {:else}<label>Private key<div class="input-action"><input bind:value={profile.keyPath} placeholder="Choose an OpenSSH private key" required/><button type="button" onclick={async()=>{try{const p=await rpc('pick_key',{});if(p)profile.keyPath=p;}catch(e){notify(e);}}}>Browse…</button></div></label><label>Passphrase <span class="muted">(optional)</span><input type="password" bind:value={passphrase} autocomplete="off"/></label>{/if}

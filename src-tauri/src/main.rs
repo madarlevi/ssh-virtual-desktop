@@ -3,9 +3,15 @@ mod browser;
 #[cfg(windows)]
 mod browser_requests;
 mod directory_cache;
+mod download_name;
 mod download_request;
 mod downloads;
 mod files;
+#[cfg(windows)]
+mod local_downloads;
+#[cfg(windows)]
+mod native_browser;
+mod remote;
 mod security;
 mod ssh;
 mod store;
@@ -193,10 +199,12 @@ async fn dispatch(
                     store::credential(&req.profile.id, "passphrase")?.set_password(&pass)?;
                 }
             }
-            Ok(json!({ "home": conn.home, "profile": conn.profile }))
+            Ok(json!({ "home": conn.home, "profile": conn.profile, "remote":conn.remote }))
         }
         "disconnect" => {
             app.state::<download_request::RequestVault>().clear();
+            #[cfg(windows)]
+            app.state::<local_downloads::LocalDownloads>().disconnect();
             state.ssh.disconnect().await;
             browser::close_all(app);
             Ok(Value::Null)
@@ -338,14 +346,43 @@ async fn dispatch(
         }
         "download_start" => {
             let c = state.ssh.get().await?;
-            Ok(serde_json::to_value(
-                downloads::start(
-                    &c,
-                    serde_json::from_value(args)?,
-                    &app.state::<download_request::RequestVault>(),
-                )
-                .await?,
-            )?)
+            let job = downloads::start(
+                &c,
+                serde_json::from_value(args)?,
+                &app.state::<download_request::RequestVault>(),
+            )
+            .await?;
+            let mut store = state.store.lock().await;
+            store.remember_download(&c.profile.id, &job.directory, true)?;
+            if store::save(app, &store).is_err() {
+                use tauri::Emitter;
+                let _ = app.emit_to(
+                    tauri::EventTarget::webview("main"),
+                    "settings-warning",
+                    "Download started, but its destination could not be saved locally.",
+                );
+            }
+            Ok(serde_json::to_value(job)?)
+        }
+        "download_destination" => {
+            let c = state.ssh.get().await?;
+            let previous = state
+                .store
+                .lock()
+                .await
+                .last_downloads
+                .get(&c.profile.id)
+                .cloned();
+            let path = downloads::destination(&c, previous.as_deref()).await?;
+            Ok(json!({"path":path,"fallback":previous.as_ref().is_some_and(|p|p!=&path)}))
+        }
+        "download_clear" => {
+            let c = state.ssh.get().await?;
+            downloads::clear_history(&c).await?;
+            #[cfg(windows)]
+            app.state::<local_downloads::LocalDownloads>()
+                .clear(&c.profile.id);
+            Ok(Value::Null)
         }
         "download_preview" => {
             let input: download_request::Input = serde_json::from_value(args)?;
@@ -353,33 +390,81 @@ async fn dispatch(
             let c = state.ssh.get().await?;
             let tools = downloads::backends(&c).await?;
             let advanced = summary.method != "GET"
-                || summary
-                    .header_names
-                    .iter()
-                    .any(|name| input.allow_authentication || !download_request::sensitive(name));
+                || (input.offer_id.is_none()
+                    || input.forward_headers
+                    || input.allow_authentication)
+                    && summary.header_names.iter().any(|name| {
+                        input.allow_authentication || !download_request::sensitive(name)
+                    });
             let backend = downloads::select_backend(&tools, advanced)?;
-            Ok(json!({"request":summary,"backend":backend}))
+            if backend == "fetch" && url::Url::parse(&input.url)?.query().is_some() {
+                bail!("FreeBSD fetch cannot protect query/signed URLs in its process arguments. Use curl, aria2c or wget for this link.")
+            }
+            Ok(
+                json!({"request":summary,"backend":backend,"capabilities":remote::backend_info(backend),"platform":c.remote.platform}),
+            )
         }
         "download_discard" => {
             app.state::<download_request::RequestVault>()
                 .discard(string(&args, "id")?);
             Ok(Value::Null)
         }
+        "download_local_start" => {
+            #[cfg(windows)]
+            {
+                let c = state.ssh.get().await?;
+                let job =
+                    local_downloads::start(app, c.clone(), serde_json::from_value(args)?).await?;
+                let mut settings = state.store.lock().await;
+                settings.remember_download(&c.profile.id, &job.directory, true)?;
+                if store::save(app, &settings).is_err() {
+                    use tauri::Emitter;
+                    let _ = app.emit_to(
+                        tauri::EventTarget::webview("main"),
+                        "settings-warning",
+                        "Transfer started, but the destination could not be saved locally.",
+                    );
+                }
+                Ok(serde_json::to_value(job)?)
+            }
+            #[cfg(not(windows))]
+            bail!("Client transfers require Windows WebView2")
+        }
+        "download_local_discard" => {
+            #[cfg(windows)]
+            if let Some(view) = app.get_webview("main") {
+                native_browser::discard_local(&view, string(&args, "token")?.to_owned()).await?;
+            }
+            Ok(Value::Null)
+        }
         "download_list" => {
             let c = state.ssh.get().await?;
-            Ok(serde_json::to_value(
-                downloads::list(
-                    &c,
-                    args.get("refresh")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                )
-                .await?,
-            )?)
+            let mut jobs = downloads::list(
+                &c,
+                args.get("refresh")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+            #[cfg(windows)]
+            jobs.extend(
+                app.state::<local_downloads::LocalDownloads>()
+                    .list(&c.profile.id),
+            );
+            jobs.sort_by_key(|j| std::cmp::Reverse(j.started));
+            Ok(serde_json::to_value(jobs)?)
         }
         "download_cancel" => {
             let c = state.ssh.get().await?;
-            downloads::cancel(&c, string(&args, "id")?).await?;
+            let id = string(&args, "id")?;
+            #[cfg(windows)]
+            if app
+                .state::<local_downloads::LocalDownloads>()
+                .cancel(&c.profile.id, id)
+            {
+                return Ok(Value::Null);
+            }
+            downloads::cancel(&c, id).await?;
             Ok(Value::Null)
         }
         "browser_open" => {
@@ -390,8 +475,29 @@ async fn dispatch(
             browser::bounds(app, &args)?;
             Ok(Value::Null)
         }
+        "browser_desktop" => {
+            browser::desktop(app, &args)?;
+            Ok(Value::Null)
+        }
         "browser_action" => {
             browser::action(app, &args)?;
+            Ok(Value::Null)
+        }
+        "browser_find" => {
+            #[cfg(windows)]
+            {
+                let id = string(&args, "id")?;
+                uuid::Uuid::parse_str(id)?;
+                let view = app
+                    .get_webview(&format!("browser-{id}"))
+                    .context("Tab has closed")?;
+                native_browser::find(
+                    &view,
+                    string(&args, "term")?.to_owned(),
+                    string(&args, "action")?.to_owned(),
+                )
+                .await?;
+            }
             Ok(Value::Null)
         }
         "appearance" => {
@@ -442,10 +548,16 @@ async fn dispatch(
     }
 }
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.manage(local_downloads::LocalDownloads::default());
+    builder
+        .manage(browser::BrowserRegistry::default())
         .manage(download_request::RequestVault::default())
         .manage(AppState::default())
         .setup(|app| {
+            #[cfg(windows)]
+            local_downloads::clean_interrupted_cache(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {

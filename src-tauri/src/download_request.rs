@@ -172,6 +172,8 @@ impl RequestVault {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Input {
+    #[serde(default)]
+    pub confirmed: bool,
     pub url: String,
     #[serde(default)]
     pub offer_id: Option<String>,
@@ -182,6 +184,8 @@ pub struct Input {
     pub body: Option<String>,
     #[serde(default)]
     pub allow_authentication: bool,
+    #[serde(default)]
+    pub forward_headers: bool,
     #[serde(default)]
     pub browser_request: bool,
     #[serde(default)]
@@ -274,6 +278,9 @@ impl Input {
         let headers: Vec<_> = c
             .headers
             .into_iter()
+            .filter(|_| {
+                self.offer_id.is_none() || self.forward_headers || self.allow_authentication
+            })
             .filter(|h| self.allow_authentication || !sensitive(&h.name))
             .collect();
         for h in &headers {
@@ -337,6 +344,38 @@ mod tests {
         v.discard(&id);
         i.url = "https://example.com/a".into();
         assert!(i.resolve(&v).is_err());
+    }
+    #[test]
+    fn optional_captured_headers_do_not_require_curl_for_public_get_by_default() {
+        let v = RequestVault::default();
+        v.capture(ContextData {
+            browser: "b".into(),
+            url: "https://example.com/a".into(),
+            method: get(),
+            headers: vec![
+                Header {
+                    name: "User-Agent".into(),
+                    value: "Fixture browser".into(),
+                },
+                Header {
+                    name: "Cookie".into(),
+                    value: "synthetic=only".into(),
+                },
+            ],
+            body: None,
+            body_unavailable: false,
+            disposition: None,
+            total: None,
+        });
+        let mut i = input();
+        i.offer_id = v.offer("b", "https://example.com/a");
+        assert!(i.resolve(&v).unwrap().headers.is_empty());
+        i.forward_headers = true;
+        let resolved = i.resolve(&v).unwrap();
+        assert_eq!(resolved.headers.len(), 1);
+        assert!(!resolved.authenticated);
+        i.allow_authentication = true;
+        assert_eq!(i.resolve(&v).unwrap().headers.len(), 2);
     }
     #[test]
     fn headers_and_config_cannot_inject() {
