@@ -1,0 +1,26 @@
+name: Bug report
+description: Report a reproducible application problem (no secrets).
+body:
+  - type: markdown
+    attributes:
+      value: 'For security vulnerabilities use SECURITY.md. Redact credentials, cookies, tokens, private paths and hostnames.'
+  - type: input
+    id: version
+    attributes:
+      label: Application version and installation method
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Windows, WebView2, Linux and shell versions
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps, expected result and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics or screenshots

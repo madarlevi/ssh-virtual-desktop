@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reporting
+    url: https://github.com/madarlevi/ssh-virtual-desktop/security/policy
+    about: Read the security policy before reporting a vulnerability.

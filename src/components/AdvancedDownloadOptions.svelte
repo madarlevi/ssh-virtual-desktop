@@ -1,0 +1,8 @@
+<script lang="ts">
+ import type {DownloadPreview} from '../lib/api';
+ let {preview,approved=$bindable(false),onapprovalchange=()=>{}}:{preview:DownloadPreview|null;approved?:boolean;onapprovalchange?:()=>void}=$props();
+</script>
+{#if preview}<dl class="request-summary"><dt>Backend / method</dt><dd>{preview.backend} / {preview.request.method}</dd><dt>Headers</dt><dd title={preview.request.headerNames.join(', ')}>{preview.request.headerNames.length} (values hidden)</dd><dt>Authentication</dt><dd>{preview.request.authenticationDetected?'Session or sensitive request data detected':'Not detected; server may still require it'}</dd><dt>Cookies</dt><dd>{preview.request.cookieCount} relevant cookies · {approved?'approved for forwarding':'not forwarded'}</dd><dt>Body</dt><dd>{preview.request.bodyUnavailable?'Unavailable — replay blocked':`${preview.request.bodyBytes} bytes`}</dd></dl>{/if}
+<label class="checkbox authentication-consent"><input type="checkbox" bind:checked={approved} onchange={onapprovalchange}/> Allow forwarding required authentication data to the remote server for this download</label>
+<p class="authentication-warning">The remote server temporarily receives approved cookies, authorization headers and request bodies, which can give it access to your session. Only trust your own server. Approval applies to this download only; authenticated redirects are stopped and require a new browser request and approval.</p>
+<p class="small muted">Browser cookie storage is never exported. Without approval, cookies and sensitive headers are omitted; POST is blocked. Blob/data URLs and unavailable request bodies cannot be delegated.</p>

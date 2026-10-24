@@ -1,0 +1,40 @@
+{
+  "name": "ssh-virtual-desktop",
+  "version": "0.2.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/madarlevi/ssh-virtual-desktop.git"
+  },
+  "homepage": "https://github.com/madarlevi/ssh-virtual-desktop#readme",
+  "bugs": "https://github.com/madarlevi/ssh-virtual-desktop/issues",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "versions:check": "node scripts/versions.mjs",
+    "version:set": "node scripts/versions.mjs --set",
+    "workflows:check": "node scripts/check-workflows.mjs",
+    "repository:check": "node scripts/check-repository.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "build": "node scripts/frontend.mjs build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:ui": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "svelte": "^5.57.2"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@tauri-apps/cli": "^2.10.1",
+    "svelte-check": "^4.4.5",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "yaml": "^2.9.1"
+  }
+}

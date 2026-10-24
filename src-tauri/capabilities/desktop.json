@@ -1,0 +1,6 @@
+{
+  "identifier": "desktop",
+  "description": "Only the local desktop view can receive events. Remote child views have no capabilities.",
+  "webviews": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-destroy"]
+}

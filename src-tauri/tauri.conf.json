@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SSH Virtual Desktop",
+  "version": "0.2.0",
+  "identifier": "dev.sshvirtualdesktop.app",
+  "build": {
+    "beforeDevCommand": "node scripts/frontend.mjs dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "node scripts/frontend.mjs build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "SSH Virtual Desktop",
+        "width": 1360,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 620,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'self'",
+      "capabilities": [
+        "desktop"
+      ]
+    }
+  },
+  "bundle": {
+    "publisher": "Madár Levente",
+    "copyright": "Copyright © 2026 Madár Levente (madarlevi)",
+    "license": "MIT",
+    "licenseFile": "../LICENSE",
+    "resources": ["../THIRD_PARTY_NOTICES.md", "../third-party/**/*"],
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "shortDescription": "A local desktop for a remote Linux server",
+    "category": "DeveloperTool",
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}
