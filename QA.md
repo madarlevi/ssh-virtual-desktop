@@ -1,5 +1,7 @@
 # Verification record
 
+**Remote-worker compatibility fix (26 October 2026):** see [root causes and final verification](docs/remote-worker-verification.md). Native Linux curl/wget/aria2c and FreeBSD 14.4 fetch pass; the final Windows suite has 45 passing Rust tests and both installer formats were built. FreeBSD 14.3 CI and connected desktop acceptance remain separate checks.
+
 **Current Update 3 (0.3.0):** see [the Update 3 verification report](docs/update-3-verification.md) and [FreeBSD test instructions](docs/freebsd.md). Live SSH and native browser workflows remain unverified without a reachable test server.
 
 **Archived Update 2 (0.2.0):** see [the complete verification report](docs/update-2-verification.md). The records below preserve the earlier 0.1.x checks and limitations.

@@ -6,6 +6,9 @@ All notable changes are documented here, following [Keep a Changelog](https://ke
 
 ### Fixed
 
+- aria2 downloads now select the UUID partial filename through the protected per-URI input options. Atomic publication and cancellation use the actual output/control files, including destinations with Unicode, spaces and shell metacharacters.
+- Native FreeBSD compatibility tests now wait for socket readiness and observable download bytes instead of assuming fetch flushes its buffers within two seconds. Failures include named assertions, exit codes, sanitized backend reasons and expected/actual paths.
+- Download workers reject missing partial files before publication, remove private request/output material before exposing a terminal status, and preserve safe failure diagnostics. Added regressions for publication races, input injection and credential cleanup.
 - Windows HTTP test fixtures now wait for socket readiness and handle partial/transient I/O without background panics. Authenticated GET/POST and redirect/credential cleanup assertions are preserved; deterministic socket regressions and repeat-run verification were added.
 
 ## [0.3.0] - 2026-10-24

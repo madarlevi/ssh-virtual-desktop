@@ -24,7 +24,11 @@ Copy `src-tauri/target/compatibility-fixtures/` plus `tests/remote-worker.sh` to
 /bin/sh tests/remote-worker.sh compatibility-fixtures
 ```
 
-The harness requires native OpenBSD-compatible nc with -N (FreeBSD base nc and Ubuntu's netcat-openbsd). It starts loopback-only synthetic HTTP endpoints and removes only a checked mktemp test directory. It does not install packages. This is a development test dependency, not an application server requirement.
+The harness requires native OpenBSD-compatible nc with -N (FreeBSD base nc and Ubuntu's netcat-openbsd), plus FreeBSD's sockstat or Linux's ss for listener readiness. Copy the entire generated fixture directory, including request templates and fetch-command.sh. It starts loopback-only synthetic HTTP endpoints and removes only a checked mktemp test directory. It does not install packages. These are development test dependencies, not application server requirements.
+
+Failures report the backend, test phase, worker/backend exit codes, sanitized error classification, expected paths and actual file metadata. Request files and raw downloader output are never printed. Progress assertions wait for real bytes while the worker remains Downloading; they do not assume fetch's native buffers flush within a fixed delay. If a detached worker does not acknowledge cancellation, the private test directory is retained rather than removed underneath it.
+
+Native FreeBSD 14.4 and Linux compatibility results, the original failure reproductions, and Windows build results are recorded in [the remote-worker verification report](remote-worker-verification.md). The GitHub Actions VM remains pinned to FreeBSD 14.3; that exact version was not available for the local verification.
 
 ## Connected Windows acceptance checklist
 

@@ -1,86 +1,247 @@
 #!/bin/sh
-# Execute the actual Rust-generated worker with native OS utilities, without a GUI or user account.
+# Run the Rust-generated production worker with native FreeBSD/Linux utilities.
 set -eu
 umask 077
 fixtures=$(cd "$1" && pwd)
 base=$(mktemp -d /tmp/svd-compat.XXXXXXXX)
 case "$base" in /tmp/svd-compat.*) ;; *) exit 1;; esac
 cd "$base"
+os=$(uname -s)
 server=''
-cleanup() { if [ -n "$server" ]; then kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; fi; rm -rf "$base"; }
-trap cleanup EXIT INT TERM
+producer=''
+backend=initialization
+phase=initialization
+worker_exit=not-run
+SVD_DEST=''
+SVD_JOB=''
 filename=$(cat "$fixtures/filename.txt")
 part=.svd-00000000-0000-0000-0000-000000000000.part
 port=$((20000 + $$ % 30000))
 export SVD_DEST SVD_JOB SVD_URL
 SVD_URL="http://127.0.0.1:$port/attachment-without-extension"
+
+read_status() { cat "$SVD_JOB/status" 2>/dev/null || :; }
+diagnostics() {
+  printf '\nCompatibility failure: OS=%s backend=%s phase=%s worker-exit=%s\n' "$os" "$backend" "$phase" "$worker_exit" >&2
+  case "$(read_status)" in
+    Starting|Waiting|Downloading|Completed|Failed|Cancelled) printf 'Worker status: %s\n' "$(read_status)" >&2;;
+    *) printf 'Worker status: absent or invalid\n' >&2;;
+  esac
+  if [ -f "$SVD_JOB/backend.exit" ]; then
+    code=$(cat "$SVD_JOB/backend.exit")
+    case "$code" in ''|*[!0-9]*) printf 'Backend exit: invalid\n' >&2;; *) printf 'Backend exit: %s\n' "$code" >&2;; esac
+  fi
+  # This file contains only the worker's allowlisted classification, never raw stderr.
+  # Request files, raw output and URLs can contain credentials and must not be printed.
+  if [ -f "$SVD_JOB/backend.stderr.safe" ]; then
+    sed 's/^/Backend stderr classification: /' "$SVD_JOB/backend.stderr.safe" >&2
+  fi
+  # The current worker emits fixed messages here, not backend output/URLs.
+  if [ -f "$SVD_JOB/error" ]; then
+    sed 's/^/Worker failure reason: /' "$SVD_JOB/error" >&2
+  fi
+  printf 'Expected partial: %s/%s\nExpected destination: %s/%s\n' "$SVD_DEST" "$part" "$SVD_DEST" "$filename" >&2
+  if [ -d "$SVD_DEST" ]; then
+    printf 'Actual destination entries (metadata only):\n' >&2
+    find "$SVD_DEST" -exec ls -ld {} \; 2>/dev/null | sed 's/^/  /' >&2
+  fi
+}
+stop_server() {
+  if [ -n "$server" ]; then kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; server=''; fi
+  if [ -n "$producer" ]; then kill "$producer" 2>/dev/null || :; wait "$producer" 2>/dev/null || :; producer=''; fi
+}
+finish() {
+  result=$?
+  trap - EXIT INT TERM
+  set +e
+  if [ "$result" -ne 0 ]; then diagnostics; fi
+  cleanup_pending=0
+  # A failed assertion must not leave a detached downloader using a removed job directory.
+  if [ -n "$SVD_JOB" ]; then
+    case "$(read_status)" in
+      Starting|Waiting|Downloading)
+        : > "$SVD_JOB/cancel"
+        cleanup_wait=0
+        while [ "$cleanup_wait" -lt 20 ]; do
+          case "$(read_status)" in Completed|Failed|Cancelled) break;; esac
+          sleep 1
+          cleanup_wait=$((cleanup_wait+1))
+        done;;
+    esac
+    case "$(read_status)" in Starting|Waiting|Downloading) cleanup_pending=1;; esac
+  fi
+  stop_server
+  # The absolute sandbox path was verified immediately after mktemp.
+  if [ "$cleanup_pending" -eq 0 ]; then
+    case "$base" in /tmp/svd-compat.*) rm -rf "$base";; esac
+  else
+    printf 'Worker did not acknowledge cancellation; private diagnostic sandbox retained: %s\n' "$base" >&2
+  fi
+  exit "$result"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+expect() { description=$1; shift; "$@" || fail "$description"; }
+absent() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
+for tool in nc mkfifo awk grep sed find ls; do
+  command -v "$tool" >/dev/null 2>&1 || fail "required compatibility-fixture utility is missing: $tool"
+done
+case "$os" in
+  FreeBSD) command -v sockstat >/dev/null 2>&1 || fail 'native sockstat is required for listener readiness';;
+  Linux) command -v ss >/dev/null 2>&1 || fail 'ss is required for listener readiness';;
+  *) fail 'unsupported test OS';;
+esac
+check_cleanup() {
+  for private in request.conf request.urls request.body fetch.sh backend.raw publication.raw; do
+    expect "temporary request/output file retained: $private" absent "$SVD_JOB/$private"
+  done
+  expect 'partial data retained' absent "$SVD_DEST/$part"
+  expect 'aria2 control file retained' absent "$SVD_DEST/$part.aria2"
+  expect 'backend used a URL-derived output filename' absent "$SVD_DEST/attachment-without-extension"
+  expect 'URL-derived aria2 control file retained' absent "$SVD_DEST/attachment-without-extension.aria2"
+  expect 'destination lock retained' absent "$SVD_DEST/$filename.svd-lock"
+}
 prepare() {
+  phase=$1
+  worker_exit=not-run
   SVD_DEST="$base/-résumé ' folder-$1"
   SVD_JOB="$base/job-$1"
   mkdir "$SVD_DEST" "$SVD_JOB"
-  printf '%s\n' "$SVD_URL" > "$SVD_JOB/request.urls"
+  # Retain the exact per-URI options generated by Rust, replacing only the synthetic URL.
+  { printf '%s\n' "$SVD_URL"; sed '1d' "$fixtures/request-$backend.urls"; } > "$SVD_JOB/request.urls"
   printf 'url = "%s"\noutput = "%s/%s"\nsilent\nwrite-out = "%%{http_code}"\n' "$SVD_URL" "$SVD_DEST" "$part" > "$SVD_JOB/request.conf"
-  printf '%s\n' '#!/bin/sh' 'exec fetch -q -T 30 -N /dev/null -o "$SVD_DEST/.svd-00000000-0000-0000-0000-000000000000.part" "$SVD_URL"' > "$SVD_JOB/fetch.sh"
+  cp "$fixtures/fetch-command.sh" "$SVD_JOB/fetch.sh"
+}
+listening() {
+  case "$os" in
+    FreeBSD) sockstat -4 -l -P tcp -p "$port" | awk 'NR > 1 { found=1 } END { exit !found }';;
+    Linux) ss -H -ltn "sport = :$port" | grep . >/dev/null;;
+    *) fail 'unsupported test OS';;
+  esac
 }
 http() {
-  mode=$1
-  if [ "$mode" = slow ]; then
-    (printf 'HTTP/1.1 200 OK\r\nContent-Length: 65536\r\nConnection: close\r\n\r\n'; i=0; while [ "$i" -lt 16 ]; do dd if=/dev/zero bs=4096 count=1 2>/dev/null; sleep 1; i=$((i+1)); done) | nc -N -l 127.0.0.1 "$port" > /dev/null &
-  else
-    printf 'HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\ncompatibility OK' | nc -N -l 127.0.0.1 "$port" > /dev/null &
-  fi
+  http_mode=$1
+  listening && fail 'HTTP fixture port is already occupied'
+  fifo="$base/http-$port-$phase.fifo"
+  mkfifo "$fifo"
+  (
+    if [ "$http_mode" = slow ]; then
+      # A large response stays in flight while fetch flushes its native stdio buffers.
+      # The assertion below waits for real bytes; this pacing controls the fixture only.
+      printf 'HTTP/1.1 200 OK\r\nContent-Length: 67108864\r\nConnection: close\r\n\r\n'
+      chunk=0
+      while [ "$chunk" -lt 256 ]; do
+        dd if=/dev/zero bs=262144 count=1 2>/dev/null
+        sleep 1
+        chunk=$((chunk+1))
+      done
+    else
+      printf 'HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\ncompatibility OK'
+    fi
+  ) > "$fifo" &
+  producer=$!
+  nc -N -l 127.0.0.1 "$port" < "$fifo" > /dev/null &
   server=$!
-  sleep 1
+  ready_wait=0
+  while [ "$ready_wait" -lt 20 ]; do
+    kill -0 "$server" 2>/dev/null || fail 'HTTP fixture listener exited before becoming ready'
+    listening && return 0
+    sleep 1
+    ready_wait=$((ready_wait+1))
+  done
+  fail 'HTTP fixture did not start listening within 20 seconds'
+}
+run_worker() {
+  worker_exit=0
+  /bin/sh "$fixtures/worker-$backend.sh" || worker_exit=$?
 }
 wait_status() {
   desired=$1
-  n=0
-  while [ "$n" -lt 20 ]; do
-    status=$(cat "$SVD_JOB/status" 2>/dev/null || :)
+  status_wait=0
+  while [ "$status_wait" -lt 20 ]; do
+    status=$(read_status)
     [ "$status" = "$desired" ] && return 0
-    if [ "$status" = Failed ]; then cat "$SVD_JOB/error"; return 1; fi
-    sleep 1; n=$((n+1))
+    case "$status" in Failed|Cancelled|Completed) fail "expected $desired, got $status";; esac
+    sleep 1
+    status_wait=$((status_wait+1))
   done
-  printf 'Timeout waiting for %s\n' "$desired" >&2
-  return 1
+  fail "timeout waiting for $desired"
 }
+wait_progress() {
+  progress_wait=0
+  while [ "$progress_wait" -lt 20 ]; do
+    expect 'detached download stopped before cancellation' test "$(read_status)" = Downloading
+    if [ -s "$SVD_DEST/$part" ]; then
+      printf 'Observed remote partial bytes: %s\n' "$(wc -c < "$SVD_DEST/$part")"
+      return 0
+    fi
+    sleep 1
+    progress_wait=$((progress_wait+1))
+  done
+  fail 'no visible partial bytes while downloading within 20 seconds'
+}
+
 count=0
 for backend in fetch curl wget aria2c; do
   command -v "$backend" >/dev/null 2>&1 || continue
-  count=$((count+1)); printf 'Testing %s on %s\n' "$backend" "$(uname -s)"
+  count=$((count+1))
+  printf 'Testing %s on %s\n' "$backend" "$os"
   prepare "$backend-success"
   http fast
-  /bin/sh "$fixtures/worker-$backend.sh"
+  run_worker
+  expect 'successful worker exited nonzero' test "$worker_exit" -eq 0
   wait_status Completed
-  [ "$(cat "$SVD_DEST/$filename")" = 'compatibility OK' ]
-  [ ! -e "$SVD_JOB/request.conf" ] && [ ! -e "$SVD_JOB/request.urls" ] && [ ! -e "$SVD_JOB/fetch.sh" ]
-  case "$(uname -s)" in FreeBSD) [ "$(stat -f %Lp "$SVD_DEST/$filename")" = 600 ];; Linux) [ "$(stat -c %a "$SVD_DEST/$filename")" = 600 ];; esac
-  wait "$server" || :; server=''
-  # Existing file must survive a second invocation.
-  /bin/sh "$fixtures/worker-$backend.sh" || :
-  [ "$(cat "$SVD_JOB/status")" = Failed ]
-  [ "$(cat "$SVD_DEST/$filename")" = 'compatibility OK' ]
+  expect 'downloaded payload differs' test "$(cat "$SVD_DEST/$filename")" = 'compatibility OK'
+  check_cleanup
+  case "$os" in
+    FreeBSD) mode=$(stat -f %Lp "$SVD_DEST/$filename");;
+    Linux) mode=$(stat -c %a "$SVD_DEST/$filename");;
+    *) fail 'unsupported test OS';;
+  esac
+  expect 'download is not owner read/write only (0600)' test "$mode" = 600
+  stop_server
+
+  phase="$backend-existing-destination"
+  # The production worker must never overwrite the already published file.
+  run_worker
+  wait_status Failed
+  expect 'collision changed existing payload' test "$(cat "$SVD_DEST/$filename")" = 'compatibility OK'
+  check_cleanup
+
+  prepare "$backend-symlink-destination"
+  ln -s "$base/must-not-create" "$SVD_DEST/$filename"
+  run_worker
+  wait_status Failed
+  expect 'collision replaced a destination symlink' test -L "$SVD_DEST/$filename"
+  expect 'collision followed a destination symlink' absent "$base/must-not-create"
+  check_cleanup
+
   prepare "$backend-cancel-before-start"
   : > "$SVD_JOB/cancel"
-  /bin/sh "$fixtures/worker-$backend.sh"
+  run_worker
+  expect 'pre-cancelled worker exited nonzero' test "$worker_exit" -eq 0
   wait_status Cancelled
-  [ ! -e "$SVD_DEST/$filename" ]
+  expect 'pre-cancelled download published a file' absent "$SVD_DEST/$filename"
+  check_cleanup
+
   prepare "$backend-detached-cancel"
   http slow
-  case "$(uname -s)" in
+  case "$os" in
     FreeBSD) /usr/sbin/daemon -f /bin/sh "$fixtures/worker-$backend.sh";;
     Linux) /bin/sh -c 'nohup setsid /bin/sh "$1" </dev/null >/dev/null 2>&1 &' sh "$fixtures/worker-$backend.sh";;
-    *) printf 'Unsupported test OS\n' >&2; exit 1;;
   esac
   wait_status Downloading
-  sleep 2
-  [ -s "$SVD_DEST/$part" ]
+  wait_progress
   : > "$SVD_JOB/cancel"
   wait_status Cancelled
-  [ ! -e "$SVD_DEST/$part" ] && [ ! -e "$SVD_DEST/$filename" ]
-  kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; server=''
-  port=$((port+1)); SVD_URL="http://127.0.0.1:$port/file"
-  printf 'PASS: %s success, collision, restrictive mode, cleanup, detached progress and cancellation\n' "$backend"
+  expect 'cancelled download published a file' absent "$SVD_DEST/$filename"
+  check_cleanup
+  stop_server
+  port=$((port+1))
+  SVD_URL="http://127.0.0.1:$port/attachment-without-extension"
+  printf 'PASS: %s success, file/symlink collisions, restrictive mode, cleanup, detached progress and cancellation\n' "$backend"
 done
-[ "$count" -gt 0 ]
-[ ! -e "$base/nope" ]
+expect 'no supported backend was tested' test "$count" -gt 0
+expect 'a special-character filename executed shell content' absent "$base/nope"

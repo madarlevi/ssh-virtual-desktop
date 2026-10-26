@@ -12,6 +12,9 @@ mod download_test_http;
 #[cfg(test)]
 #[path = "download_tests.rs"]
 mod integration_tests;
+#[cfg(test)]
+#[path = "download_worker_tests.rs"]
+mod worker_regressions;
 
 #[derive(Deserialize)]
 pub struct Request {
@@ -241,26 +244,14 @@ pub async fn start(c: &Connection, r: Request, vault: &RequestVault) -> Result<J
             let config = curl_config(&job, &jobdir, &resolved)?;
             write(c, &format!("{jobdir}/request.conf"), config.as_bytes()).await?;
         } else {
-            write(
-                c,
-                &format!("{jobdir}/request.urls"),
-                format!("{}\n", resolved.url).as_bytes(),
-            )
-            .await?;
+            let input = url_input(backend, &job.id, &resolved.url)?;
+            write(c, &format!("{jobdir}/request.urls"), input.as_bytes()).await?;
         }
         if backend == "fetch" {
             write(
                 c,
                 &format!("{jobdir}/fetch.sh"),
-                format!(
-                    "#!/bin/sh\nexec fetch -q -T 30 -N /dev/null -o {} {}\n",
-                    quote(&security::join(
-                        &job.directory,
-                        &format!(".svd-{}.part", job.id)
-                    )?)?,
-                    quote(&resolved.url)?
-                )
-                .as_bytes(),
+                fetch_script(&job, &resolved.url)?.as_bytes(),
             )
             .await?;
         }
@@ -282,9 +273,32 @@ pub async fn start(c: &Connection, r: Request, vault: &RequestVault) -> Result<J
     }
     Ok(job)
 }
+fn partial_name(id: &str) -> Result<String> {
+    // The backend input format has its own syntax: never put user filenames in it.
+    let id = uuid::Uuid::parse_str(id)?;
+    Ok(format!(".svd-{id}.part"))
+}
+fn url_input(backend: &str, id: &str, url: &str) -> Result<zeroize::Zeroizing<String>> {
+    security::http_url(url)?;
+    let mut input = zeroize::Zeroizing::new(format!("{url}\n"));
+    if backend == "aria2c" {
+        // aria2 ignores command-line --out with --input-file. Its unquoted,
+        // per-URI option must name the same ASCII partial that publication uses.
+        input.push_str(&format!("  out={}\n", partial_name(id)?));
+    }
+    Ok(input)
+}
+fn fetch_script(job: &Job, url: &str) -> Result<zeroize::Zeroizing<String>> {
+    security::http_url(url)?;
+    Ok(zeroize::Zeroizing::new(format!(
+        "#!/bin/sh\nexec fetch -q -T 30 -N /dev/null -o {} {}\n",
+        quote(&security::join(&job.directory, &partial_name(&job.id)?)?)?,
+        quote(url)?
+    )))
+}
 fn curl_config(job: &Job, jobdir: &str, request: &Resolved) -> Result<zeroize::Zeroizing<String>> {
     use download_request::config_word as q;
-    let partial = security::join(&job.directory, &format!(".svd-{}.part", job.id))?;
+    let partial = security::join(&job.directory, &partial_name(&job.id)?)?;
     let mut config=zeroize::Zeroizing::new(format!("url = {}\noutput = {}\nrequest = {}\nheader = \"Accept-Encoding: identity\"\nconnect-timeout = 30\nmax-redirs = 10\nproto = \"=http,https\"\nproto-redir = \"=http,https\"\nsilent\nwrite-out = \"%{{http_code}}\"\n",q(&request.url)?,q(&partial)?,q(&request.method)?));
     // Request identity encoding, but decode if a server nevertheless encodes its response.
     config.push_str("compressed\n");
@@ -306,11 +320,11 @@ fn curl_config(job: &Job, jobdir: &str, request: &Resolved) -> Result<zeroize::Z
     Ok(config)
 }
 fn worker(job: &Job, jobdir: &str) -> Result<String> {
-    let partial_name = format!(".svd-{}.part", job.id);
+    let partial_name = partial_name(&job.id)?;
     let partial = security::join(&job.directory, &partial_name)?;
     let target = security::join(&job.directory, &job.filename)?;
     let download = match job.backend.as_str() {
-        "aria2c" => format!("aria2c --no-conf=true --no-netrc=true --enable-rpc=false --follow-torrent=false --follow-metalink=false --split=1 --max-connection-per-server=1 --enable-mmap=false --allow-overwrite=false --auto-file-renaming=false --file-allocation=none --check-certificate=true --max-tries=3 --retry-wait=1 --summary-interval=0 --show-console-readout=false --console-log-level=error --download-result=hide --dir={} --out={} --input-file=\"$job/request.urls\"", quote(&job.directory)?, quote(&partial_name)?),
+        "aria2c" => format!("aria2c --no-conf=true --no-netrc=true --enable-rpc=false --follow-torrent=false --follow-metalink=false --split=1 --max-connection-per-server=1 --enable-mmap=false --allow-overwrite=false --auto-file-renaming=false --file-allocation=none --check-certificate=true --max-tries=3 --retry-wait=1 --summary-interval=0 --show-console-readout=false --console-log-level=error --download-result=hide --dir={} --input-file=\"$job/request.urls\"", quote(&job.directory)?),
         "wget" => format!("wget --no-config --no-netrc --quiet --tries=3 --timeout=30 --max-redirect=10 --output-document={} --input-file=\"$job/request.urls\"",quote(&partial)?),
         "curl" => "curl --disable --config \"$job/request.conf\" > \"$job/http-status\"".into(),
         "fetch" => "/bin/sh \"$job/fetch.sh\"".into(),
@@ -325,9 +339,33 @@ job={jobdir}
 part={partial}
 target={target}
 lock="$target.svd-lock"
-request_cleanup() {{ rm -f "$job/request.conf" "$job/request.body" "$job/request.urls" "$job/fetch.sh"; }}
+backend={backend}
+request_cleanup() {{ rm -f "$job/request.conf" "$job/request.body" "$job/request.urls" "$job/fetch.sh" "$job/backend.raw" "$job/publication.raw"; }}
 trap request_cleanup EXIT
-state() {{ printf '%s\n' "$1" > "$job/status.next"; mv -f "$job/status.next" "$job/status"; }}
+state() {{
+  # Observers may inspect cleanup as soon as a terminal state becomes visible.
+  case "$1" in Completed|Failed|Cancelled) request_cleanup;; esac
+  printf '%s\n' "$1" > "$job/status.next"
+  mv -f "$job/status.next" "$job/status"
+}}
+# Backend output may contain signed URLs or credentials. Retain only allowlisted
+# classifications, never raw output or an interpolated line from a server.
+diagnose() {{
+  reason='No recognized diagnostic; raw output was removed to protect request credentials.'
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *'Permission denied'*) reason='Permission denied writing the output or reading request metadata.'; break;;
+      *'No such file or directory'*) reason='A required input file or output directory is missing.'; break;;
+      *'No space left on device'*) reason='No space left on the destination filesystem.'; break;;
+      *'Could not resolve'*|*'could not resolve'*|*'Name or service not known'*|*'Name does not resolve'*) reason='Remote host name resolution failed.'; break;;
+      *'Connection refused'*|*'Failed to connect'*) reason='The remote HTTP endpoint refused the connection.'; break;;
+      *'timed out'*|*'Timeout'*) reason='The remote HTTP connection timed out.'; break;;
+      *'certificate'*|*'Certificate'*) reason='TLS certificate verification failed.'; break;;
+      *'404'*|*'Not Found'*) reason='The HTTP endpoint reported that the resource was not found.'; break;;
+    esac
+  done < "$1"
+  printf '%s\n' "$reason" > "$job/backend.stderr.safe"
+}}
 state Starting
 date +%s > "$job/heartbeat"
 if ! mkdir "$lock" 2>/dev/null; then printf '%s\n' 'Destination reserved by another job; choose another filename.' > "$job/error"; state Failed; exit 1; fi
@@ -337,7 +375,7 @@ trap abort INT TERM
 if [ -e "$target" ] || [ -L "$target" ]; then printf '%s\n' 'Destination already exists' > "$job/error"; cleanup; state Failed; exit 1; fi
 if [ -f "$job/cancel" ]; then cleanup; state Cancelled; exit 0; fi
 state Downloading
-( exec {download} ) > /dev/null 2>&1 &
+( exec {download} ) > "$job/backend.raw" 2>&1 &
 child=$!
 (
   while kill -0 "$child" 2>/dev/null; do
@@ -351,6 +389,8 @@ wait "$child"
 code=$?
 kill "$watcher" 2>/dev/null
 wait "$watcher" 2>/dev/null
+printf '%s\n' "$code" > "$job/backend.exit"
+diagnose "$job/backend.raw"
 if [ -f "$job/cancel" ]; then cleanup; state Cancelled; exit 0; fi
 if [ -f "$job/http-status" ]; then
   http=$(cat "$job/http-status")
@@ -361,20 +401,29 @@ if [ -f "$job/http-status" ]; then
   esac
 fi
 if [ "$code" -eq 0 ]; then
+  if [ ! -f "$part" ] || [ -L "$part" ]; then
+    printf '%s\n' "$backend exited successfully but the expected regular partial file is missing. Nothing was published." > "$job/error"
+    cleanup; state Failed; exit 1
+  fi
   # Hard-link publication is atomic and fails if the destination appears meanwhile.
   # Partial and final file are in the same directory and filesystem.
-  if link "$part" "$target" 2> "$job/error"; then
+  if link "$part" "$target" 2> "$job/publication.raw"; then
     wc -c < "$target" > "$job/bytes"
-    cleanup; state Completed
-  else cleanup; state Failed; fi
+    cleanup; state Completed; exit 0
+  else
+    diagnose "$job/publication.raw"
+    printf '%s\n' 'Atomic publication failed; the destination may exist or the filesystem may not support hard links. No existing file was overwritten.' > "$job/error"
+    cleanup; state Failed; exit 1
+  fi
 else
-  if [ ! -s "$job/error" ]; then printf '%s\n' "Remote downloader failed (exit $code). Check connectivity, permissions and URL expiry." > "$job/error"; fi
-  cleanup; state Failed
+  if [ ! -s "$job/error" ]; then printf '%s\n' "$backend failed (exit $code). $reason" > "$job/error"; fi
+  cleanup; state Failed; exit 1
 fi
 "#,
         jobdir = quote(jobdir)?,
         partial = quote(&partial)?,
         target = quote(&target)?,
+        backend = quote(&job.backend)?,
         download = download
     ))
 }
@@ -518,6 +567,28 @@ mod tests {
             assert!(!script.contains("ln -T"));
             assert!(!script.contains(" -- \""));
             std::fs::write(directory.join(format!("worker-{backend}.sh")), script).unwrap();
+            // Native tests must use the real request serializer too: duplicating
+            // only the shell worker would miss aria2's per-URI output options.
+            std::fs::write(
+                directory.join(format!("request-{backend}.urls")),
+                url_input(backend, &job.id, "https://example.invalid/fixture")
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+            if backend == "fetch" {
+                let fetch = fetch_script(&job, "https://example.invalid/fixture")
+                    .unwrap()
+                    .replace(
+                        &quote(&partial).unwrap(),
+                        &format!("\"$SVD_DEST/.svd-{}.part\"", job.id),
+                    )
+                    .replace(
+                        &quote("https://example.invalid/fixture").unwrap(),
+                        "\"$SVD_URL\"",
+                    );
+                std::fs::write(directory.join("fetch-command.sh"), fetch).unwrap();
+            }
             std::fs::write(directory.join("filename.txt"), &job.filename).unwrap();
         }
     }
