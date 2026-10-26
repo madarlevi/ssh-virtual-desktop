@@ -7,6 +7,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 #[cfg(test)]
+#[path = "download_test_http.rs"]
+mod download_test_http;
+#[cfg(test)]
 #[path = "download_tests.rs"]
 mod integration_tests;
 
@@ -555,10 +558,9 @@ mod tests {
     }
 
     #[test]
-    fn worker_downloads_and_never_overwrites() {
+    fn worker_downloads_and_never_overwrites() -> Result<()> {
+        use super::download_test_http::{Fixture, Response};
         use std::{
-            io::{Read, Write},
-            net::TcpListener,
             process::{Command, Stdio},
             time::{Duration, Instant},
         };
@@ -567,9 +569,10 @@ mod tests {
         } else {
             "/bin/sh"
         };
-        if !std::path::Path::new(shell).exists() {
-            return;
-        }
+        anyhow::ensure!(
+            std::path::Path::new(shell).is_file(),
+            "The real worker test requires a POSIX shell (Git for Windows on Windows)"
+        );
         let base = std::env::current_dir()
             .unwrap()
             .join("target/worker-tests")
@@ -583,30 +586,15 @@ mod tests {
                 s
             }
         };
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let address = listener.local_addr().unwrap();
         let payload = b"A real HTTP response, fetched by the shell download worker.\n";
-        let server = std::thread::spawn(move || {
-            let started = Instant::now();
-            while started.elapsed() < Duration::from_secs(15) {
-                if let Ok((mut stream, _)) = listener.accept() {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(3)))
-                        .unwrap();
-                    let mut request = [0; 4096];
-                    let _ = stream.read(&mut request);
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        payload.len()
-                    );
-                    let _ = stream.write_all(payload);
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        });
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(payload);
+        let server = Fixture::start(vec![Response::Complete(response)])?;
+        let address = server.address;
         let mut job = Job {
             id: uuid::Uuid::new_v4().to_string(),
             url: format!("http://{address}/file?a=1&b=2"),
@@ -671,14 +659,16 @@ mod tests {
             }
             std::fs::read_to_string(dir.join("status")).unwrap()
         };
+        let status = run(&job, false);
+        server.next_request()?;
         assert_eq!(
-            run(&job, false).trim(),
+            status.trim(),
             "Completed",
             "{}",
             std::fs::read_to_string(base.join(&job.id).join("error")).unwrap_or_default()
         );
         assert_eq!(std::fs::read(base.join(&job.filename)).unwrap(), payload);
-        server.join().unwrap();
+        server.finish()?;
         // A second invocation must leave an existing destination intact.
         job.id = uuid::Uuid::new_v4().to_string();
         assert_eq!(run(&job, false).trim(), "Failed");
@@ -697,5 +687,6 @@ mod tests {
                 .join("target/worker-tests")
         ));
         std::fs::remove_dir_all(resolved).unwrap();
+        Ok(())
     }
 }

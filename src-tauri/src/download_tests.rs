@@ -1,23 +1,24 @@
 //! Controlled HTTP fixtures use synthetic session values only; no browser or SSH account.
+use super::download_test_http::{Fixture, Response};
 use super::*;
 use crate::download_request::Header;
 use std::{
-    io::{Read, Write},
     net::TcpListener,
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
 #[test]
-fn authenticated_get_post_and_redirect_do_not_leak_or_retain_credentials() {
+fn authenticated_get_post_and_redirect_do_not_leak_or_retain_credentials() -> Result<()> {
     let shell = if cfg!(windows) {
         "C:/Program Files/Git/bin/sh.exe"
     } else {
         "/bin/sh"
     };
-    if !std::path::Path::new(shell).exists() {
-        return;
-    }
+    anyhow::ensure!(
+        std::path::Path::new(shell).is_file(),
+        "The real worker test requires a POSIX shell (Git for Windows on Windows)"
+    );
     let base = std::env::current_dir()
         .unwrap()
         .join("target/auth-worker-tests")
@@ -31,58 +32,15 @@ fn authenticated_get_post_and_redirect_do_not_leak_or_retain_credentials() {
             s
         }
     };
-    let server = TcpListener::bind("127.0.0.1:0").unwrap();
-    server.set_nonblocking(true).unwrap();
-    let address = server.local_addr().unwrap();
-    let sink = TcpListener::bind("127.0.0.1:0").unwrap();
-    sink.set_nonblocking(true).unwrap();
-    let sink_address = sink.local_addr().unwrap();
-    let endpoint = std::thread::spawn(move || {
-        let mut requests = vec![];
-        let begin = Instant::now();
-        while requests.len() < 3 && begin.elapsed() < Duration::from_secs(15) {
-            let Ok((mut stream, _)) = server.accept() else {
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .unwrap();
-            let mut data = vec![];
-            loop {
-                let mut b = [0; 4096];
-                let n = stream.read(&mut b).unwrap();
-                if n == 0 {
-                    break;
-                }
-                data.extend_from_slice(&b[..n]);
-                if let Some(i) = data.windows(4).position(|v| v == b"\r\n\r\n") {
-                    let header = String::from_utf8_lossy(&data[..i]);
-                    let len = header
-                        .lines()
-                        .find_map(|l| {
-                            l.to_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|v| v.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if data.len() >= i + 4 + len {
-                        break;
-                    }
-                }
-                assert!(data.len() < 65536);
-            }
-            let text = String::from_utf8(data).unwrap();
-            let number = requests.len();
-            requests.push(text);
-            if number == 2 {
-                write!(stream,"HTTP/1.1 302 Found\r\nLocation: http://{sink_address}/must-not-receive-session\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-            } else {
-                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 18\r\nConnection: close\r\n\r\ncontrolled payload").unwrap();
-            }
-        }
-        requests
-    });
+    let sink = TcpListener::bind("127.0.0.1:0")?;
+    sink.set_nonblocking(true)?;
+    let sink_address = sink.local_addr()?;
+    let success =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 18\r\nConnection: close\r\n\r\ncontrolled payload"
+            .to_vec();
+    let endpoint=Fixture::start(vec![Response::Complete(success.clone()),Response::Complete(success),Response::Complete(format!("HTTP/1.1 302 Found\r\nLocation: http://{sink_address}/must-not-receive-session\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes())])?;
+    let address = endpoint.address;
+    let mut requests = Vec::new();
     for (i, method) in ["GET", "POST", "GET"].into_iter().enumerate() {
         let job = Job {
             id: uuid::Uuid::new_v4().to_string(),
@@ -157,8 +115,18 @@ fn authenticated_get_post_and_redirect_do_not_leak_or_retain_credentials() {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let status = std::fs::read_to_string(dir.join("status")).unwrap();
-        assert_eq!(status.trim(), if i == 2 { "Failed" } else { "Completed" });
+        requests.push(
+            endpoint
+                .next_request()
+                .with_context(|| format!("HTTP fixture request {i} failed"))?,
+        );
+        let status = std::fs::read_to_string(dir.join("status"))?;
+        assert_eq!(
+            status.trim(),
+            if i == 2 { "Failed" } else { "Completed" },
+            "Worker {i}: {}",
+            std::fs::read_to_string(dir.join("error")).unwrap_or_default()
+        );
         for secret in ["request.conf", "request.body", "request.urls"] {
             assert!(
                 !dir.join(secret).exists(),
@@ -174,13 +142,24 @@ fn authenticated_get_post_and_redirect_do_not_leak_or_retain_credentials() {
             assert!(std::fs::read_to_string(dir.join("error"))
                 .unwrap()
                 .contains("Redirect not followed"));
-            assert!(
-                sink.accept().is_err(),
-                "another origin received the authenticated redirect"
-            );
+            // Only WouldBlock proves that the backlog is empty; other errors must fail.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match sink.accept() {
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::Interrupted
+                            && Instant::now() < deadline =>
+                    {
+                        continue
+                    }
+                    Err(e) => return Err(e).context("Could not inspect redirect sink"),
+                    Ok(_) => bail!("another origin received the authenticated redirect"),
+                }
+            }
         }
     }
-    let requests = endpoint.join().unwrap();
+    endpoint.finish()?;
     assert_eq!(requests.len(), 3);
     for r in &requests {
         assert!(r.contains("Authorization: Bearer SYNTHETIC-FIXTURE-TOKEN"));
@@ -189,18 +168,20 @@ fn authenticated_get_post_and_redirect_do_not_leak_or_retain_credentials() {
     }
     assert!(requests[1].starts_with("POST "));
     assert!(requests[1].ends_with("test=synthetic-body"));
+    Ok(())
 }
 
 #[test]
-fn active_cancellation_uses_private_marker_and_portable_base_options() {
+fn active_cancellation_uses_private_marker_and_portable_base_options() -> Result<()> {
     let shell = if cfg!(windows) {
         "C:/Program Files/Git/bin/sh.exe"
     } else {
         "/bin/sh"
     };
-    if !std::path::Path::new(shell).exists() {
-        return;
-    }
+    anyhow::ensure!(
+        std::path::Path::new(shell).is_file(),
+        "The real worker test requires a POSIX shell (Git for Windows on Windows)"
+    );
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target/cancel-tests")
         .join(uuid::Uuid::new_v4().to_string());
@@ -213,35 +194,11 @@ fn active_cancellation_uses_private_marker_and_portable_base_options() {
             s
         }
     };
-    let server = TcpListener::bind("127.0.0.1:0").unwrap();
-    server.set_nonblocking(true).unwrap();
-    let address = server.local_addr().unwrap();
-    let endpoint = std::thread::spawn(move || {
-        let start = Instant::now();
-        loop {
-            if let Ok((mut stream, _)) = server.accept() {
-                let mut b = [0; 4096];
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let _ = stream.read(&mut b);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 819200\r\nConnection: close\r\n\r\n",
-                );
-                for _ in 0..200 {
-                    if stream.write_all(&[b'x'; 4096]).is_err() {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                return;
-            }
-            if start.elapsed() > Duration::from_secs(10) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    });
+    let mut response =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 819200\r\nConnection: close\r\n\r\n".to_vec();
+    response.extend_from_slice(&[b'x'; 32768]);
+    let endpoint = Fixture::start(vec![Response::UntilPeerCloses(response)])?;
+    let address = endpoint.address;
     let job = Job {
         id: uuid::Uuid::new_v4().to_string(),
         url: format!("http://{address}/slow"),
@@ -332,7 +289,8 @@ fn active_cancellation_uses_private_marker_and_portable_base_options() {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    endpoint.join().unwrap();
+    endpoint.next_request()?;
+    endpoint.finish()?;
     assert_eq!(
         std::fs::read_to_string(dir.join("status")).unwrap().trim(),
         "Cancelled"
@@ -348,4 +306,5 @@ fn active_cancellation_uses_private_marker_and_portable_base_options() {
             .unwrap()
     ));
     std::fs::remove_dir_all(resolved).unwrap();
+    Ok(())
 }

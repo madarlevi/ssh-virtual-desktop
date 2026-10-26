@@ -4,6 +4,10 @@ All notable changes are documented here, following [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows HTTP test fixtures now wait for socket readiness and handle partial/transient I/O without background panics. Authenticated GET/POST and redirect/credential cleanup assertions are preserved; deterministic socket regressions and repeat-run verification were added.
+
 ## [0.3.0] - 2026-10-24
 
 ### Added
